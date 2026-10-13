@@ -1,0 +1,13 @@
+{
+  "organization": "thebigcrafter",
+  "axolotl_pm": {
+    "repository": "axolotl-pm/PocketMine-MP",
+    "tested_tag": "5.49.1",
+    "tested_commit": "dfe0d07e48a9e8d5a4a242fa43ff1cd3b743a955"
+  },
+  "devtools": {
+    "repository": "NhanAZ/DevTools",
+    "tested_tag": "v1.0.10",
+    "tested_commit": "f89c929de25ea5e45418b8caeb688db77d97c2f6"
+  }
+}

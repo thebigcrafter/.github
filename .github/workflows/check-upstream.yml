@@ -1,0 +1,114 @@
+name: Check upstream compatibility
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      fail_on_update:
+        description: Fail when a newer stable release is detected
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  check-upstream:
+    name: Check upstream release baselines
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FAIL_ON_UPDATE: ${{ inputs.fail_on_update || false }}
+    steps:
+      - name: Check out maintenance baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Query stable upstream releases
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          read_release() {
+            local key="$1"
+            local file="$2"
+            local repository="$3"
+            local baseline="$4"
+            local release tag ref tag_object commit
+
+            release="$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${repository}/releases/latest")"
+            tag="$(jq -r '.tag_name' <<<"${release}")"
+            ref="$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${repository}/git/ref/tags/${tag}")"
+            tag_object="$(jq -r '.object.sha' <<<"${ref}")"
+            if [[ "$(jq -r '.object.type' <<<"${ref}")" == "tag" ]]; then
+              commit="$(curl --fail --silent --show-error \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${repository}/git/tags/${tag_object}" \
+                | jq -r '.object.sha')"
+            else
+              commit="${tag_object}"
+            fi
+
+            jq --arg key "${key}" \
+              --arg repository "${repository}" \
+              --arg baseline "${baseline}" \
+              --arg latest "${tag}" \
+              --arg commit "${commit}" \
+              --arg release_url "https://github.com/${repository}/releases/tag/${tag}" \
+              '. + {($key): {repository: $repository, tested_tag: $baseline, latest_tag: $latest, latest_commit: $commit, release_url: $release_url}}' \
+              "${file}" > "${file}.next"
+            mv "${file}.next" "${file}"
+          }
+
+          cp maintenance-baseline.json upstream-status.json
+          read_release axolotl_pm upstream-status.json \
+            "$(jq -r '.axolotl_pm.repository' maintenance-baseline.json)" \
+            "$(jq -r '.axolotl_pm.tested_tag' maintenance-baseline.json)"
+          read_release devtools upstream-status.json \
+            "$(jq -r '.devtools.repository' maintenance-baseline.json)" \
+            "$(jq -r '.devtools.tested_tag' maintenance-baseline.json)"
+
+      - name: Report update status
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## thebigcrafter upstream compatibility watch"
+            echo
+            echo "| Upstream | Tested baseline | Latest stable | Latest commit | Status |"
+            echo "| --- | --- | --- | --- | --- |"
+            for key in axolotl_pm devtools; do
+              repository="$(jq -r --arg key "${key}" '.[$key].repository' upstream-status.json)"
+              tested="$(jq -r --arg key "${key}" '.[$key].tested_tag' upstream-status.json)"
+              latest="$(jq -r --arg key "${key}" '.[$key].latest_tag' upstream-status.json)"
+              commit="$(jq -r --arg key "${key}" '.[$key].latest_commit' upstream-status.json)"
+              url="$(jq -r --arg key "${key}" '.[$key].release_url' upstream-status.json)"
+              if [[ "${tested#v}" == "${latest#v}" ]]; then
+                status="Current"
+              else
+                status="Update available"
+                echo "::warning title=${repository} update::${latest} is newer than tested baseline ${tested}. Review the compatibility gates before updating."
+              fi
+              echo "| [${repository}](${url}) | ${tested} | ${latest} | '${commit}' | ${status} |"
+            done
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${FAIL_ON_UPDATE}" == "true" ]] && jq -e '
+            (.axolotl_pm.tested_tag | ltrimstr("v")) != (.axolotl_pm.latest_tag | ltrimstr("v"))
+            or
+            (.devtools.tested_tag | ltrimstr("v")) != (.devtools.latest_tag | ltrimstr("v"))
+          ' upstream-status.json > /dev/null; then
+            echo "A newer stable upstream release requires compatibility review." >&2
+            exit 1
+          fi
